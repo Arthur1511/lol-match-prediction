@@ -1,0 +1,15 @@
+[project]
+name = "lol-match-prediction"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "lightgbm>=4.6.0",
+    "mlflow>=3.10.1",
+    "pandas>=2.3.3",
+    "pyyaml>=6.0.3",
+    "requests>=2.32.5",
+    "scikit-learn>=1.8.0",
+    "tqdm>=4.67.3",
+]

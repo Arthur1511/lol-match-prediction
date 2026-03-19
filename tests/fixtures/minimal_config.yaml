@@ -1,0 +1,52 @@
+# Minimal configuration for backward compatibility testing
+# This config intentionally omits the new endpoint_rate_limits section
+# to verify the collector falls back to the single RateLimiter
+
+riot_api:
+  api_key: RGAPI-test-key-placeholder
+  base_url: "https://{region}.api.riotgames.com"
+  rate_limit_per_second: 20
+  rate_limit_per_2min: 100
+  default_region: "br1"
+  timeout_seconds: 30
+  max_retries: 3
+  retry_delay_seconds: 5
+  retry_strategy:
+    exponential_backoff: true
+    base_delay_seconds: 1
+    max_delay_seconds: 60
+  endpoints:
+    league_entries: "/lol/league/v4/entries/{queue}/{tier}/{division}"
+    challenger_league: "/lol/league/v4/challengerleagues/by-queue/{queue}"
+    grandmaster_league: "/lol/league/v4/grandmasterleagues/by-queue/{queue}"
+    master_league: "/lol/league/v4/masterleagues/by-queue/{queue}"
+    summoner_by_id: "/lol/summoner/v4/summoners/{summoner_id}"
+    match_ids_by_puuid: "/lol/match/v5/matches/by-puuid/{puuid}/ids"
+    match_by_id: "/lol/match/v5/matches/{match_id}"
+  queue_types:
+    ranked_solo: "RANKED_SOLO_5x5"
+  target_tiers:
+    - CHALLENGER
+    - GRANDMASTER
+    - MASTER
+
+collection:
+  initial_players_per_tier: 10
+  matches_per_player: 20
+  max_total_matches: 100
+  max_iterations: 2
+  queue_filter: 420
+
+performance:
+  max_concurrent_requests: 5
+  enable_batch_processing: true
+
+storage:
+  bronze_path: "data/test_bronze"
+  landing_path: "data/test_landing"
+  compression: "snappy"
+
+logging:
+  level: "WARNING"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/test_collector.log"

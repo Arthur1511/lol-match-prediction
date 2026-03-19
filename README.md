@@ -201,4 +201,3 @@ notebooks/
 # Licença
 
 Projeto educacional para estudo de Data Science e Machine Learning.
-

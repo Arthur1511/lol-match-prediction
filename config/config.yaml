@@ -1,0 +1,139 @@
+# Riot API Configuration
+riot_api:
+  api_key: ${RIOT_API_KEY} # Loaded from environment variable
+  base_url: "https://{region}.api.riotgames.com"
+
+  # Rate limits (Production API Key)
+  rate_limit_per_second: 20
+  rate_limit_per_2min: 100
+
+  # Per-endpoint rate limits (requests per second)
+  endpoint_rate_limits:
+    match_v5: 200        # /lol/match/v5/* endpoints (2000/10s)
+    league_v4_elite: 3    # challenger/grandmaster/master leagues (30/10s)
+    league_v4_entries: 5  # league entries by tier/division (50/10s)
+    summoner_v4: 27       # summoner lookup (1600/1m ≈ 27/s)
+    default: 20           # fallback for unknown endpoints
+
+  # Default region
+  default_region: "br1"
+
+  # Supported regions
+  regions:
+    - br1
+    - na1
+    - euw1
+    - eun1
+    - kr
+    - jp1
+    - la1
+    - la2
+    - oc1
+    - tr1
+    - ru
+
+  # Region routing for match-v5 endpoints
+  region_routing:
+    br1: americas
+    na1: americas
+    la1: americas
+    la2: americas
+    euw1: europe
+    eun1: europe
+    tr1: europe
+    ru: europe
+    kr: asia
+    jp1: asia
+    oc1: sea
+
+  # API endpoints
+  endpoints:
+    # For DIAMOND and below (uses tier/division)
+    league_entries: "/lol/league/v4/entries/{queue}/{tier}/{division}"
+    # For special tiers (CHALLENGER, GRANDMASTER, MASTER)
+    challenger_league: "/lol/league/v4/challengerleagues/by-queue/{queue}"
+    grandmaster_league: "/lol/league/v4/grandmasterleagues/by-queue/{queue}"
+    master_league: "/lol/league/v4/masterleagues/by-queue/{queue}"
+    # Summoner endpoints
+    summoner_by_id: "/lol/summoner/v4/summoners/{summoner_id}"
+    summoner_by_puuid: "/lol/summoner/v4/summoners/by-puuid/{puuid}"
+    # Match endpoints
+    match_ids_by_puuid: "/lol/match/v5/matches/by-puuid/{puuid}/ids"
+    match_by_id: "/lol/match/v5/matches/{match_id}"
+
+  # Queue types
+  queue_types:
+    ranked_solo: "RANKED_SOLO_5x5"
+    ranked_flex: "RANKED_FLEX_SR"
+
+  # Tiers to collect from
+  target_tiers:
+    - CHALLENGER
+    - GRANDMASTER
+    - MASTER
+    - DIAMOND
+
+  # Request settings
+  timeout_seconds: 30
+  max_retries: 3
+  retry_delay_seconds: 5
+
+  # Retry strategy with exponential backoff
+  retry_strategy:
+    exponential_backoff: true
+    base_delay_seconds: 1
+    max_delay_seconds: 60
+
+# Data Collection Settings
+collection:
+  # Step 1: How many players to fetch from ladder
+  initial_players_per_tier: 50
+
+  # Step 2: How many matches to fetch per player
+  matches_per_player: 100
+
+  # Step 3: Snowball expansion settings
+  max_total_matches: 10000 # Stop after collecting this many matches
+  max_iterations: 5 # Maximum snowball iterations
+
+  # Only collect Ranked Solo/Duo matches
+  queue_filter: 420 # Queue ID for Ranked Solo/Duo
+
+  # Patch filtering (optional - set to null to collect all patches)
+  min_patch_version: "14.5" # Only collect matches from this patch onwards
+
+# Performance Settings
+performance:
+  # Maximum concurrent requests for batch processing
+  # Keep below rate_limit_per_second (20) to prevent overwhelming rate limiter
+  max_concurrent_requests: 15
+
+  # Enable batch processing for match details (10x speedup)
+  enable_batch_processing: true
+
+  # Response cache settings
+  enable_response_cache: true        # Enable/disable caching
+  cache_max_size: 10000              # Max matches to cache
+  report_cache_stats: true           # Log cache performance
+
+# Data Storage
+storage:
+  # Bronze layer - raw API responses
+  bronze_path: "data/bronze"
+
+  # Landing zone - temporary JSON storage before Parquet conversion
+  landing_path: "data/landing"
+
+  # Compression
+  compression: "snappy"
+
+  # Partitioning
+  partition_by:
+    - "patch_version"
+    - "region"
+
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/collector.log"

@@ -105,3 +105,50 @@ def extract_patch_version(game_version: str) -> str:
     if len(parts) >= 2:
         return f"{parts[0]}.{parts[1]}"
     return "unknown"
+
+
+def decode_match_timestamp(match_id: str) -> int:
+    """
+    Decode timestamp from Riot match ID.
+
+    Riot match v5 IDs encode timestamps that can be extracted for sorting.
+    Format: {region}_{timestamp}_{increment} where timestamp is in milliseconds.
+
+    Args:
+        match_id: Match ID (e.g., "BR1_1234567890_1")
+
+    Returns:
+        Unix timestamp in milliseconds, or 0 if decoding fails
+    """
+    try:
+        # Match IDs from Riot API are in readable format
+        # Format: BR1_1234567890_1 or similar
+        parts = match_id.split('_')
+
+        if len(parts) >= 2:
+            # Second part is the timestamp
+            return int(parts[1])
+
+        # Fallback: return 0 (oldest possible)
+        return 0
+
+    except (ValueError, IndexError):
+        # Invalid format, return oldest possible
+        return 0
+
+
+def sort_match_ids_by_recency(match_ids: list) -> list:
+    """
+    Sort match IDs by recency (most recent first).
+
+    Args:
+        match_ids: List of match IDs
+
+    Returns:
+        Sorted list (most recent first)
+    """
+    return sorted(
+        match_ids,
+        key=lambda mid: decode_match_timestamp(mid),
+        reverse=True
+    )

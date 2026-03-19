@@ -86,15 +86,23 @@ riot_api:
 
 # Data Collection Settings
 collection:
+  # Phase 1: Match ID Discovery
+  phase1_max_match_ids: 50000          # Total match IDs to discover
+  phase1_max_iterations: 3              # Snowball iterations in Phase 1
+  phase1_players_per_iteration: 50      # Players to process per iteration
+
+  # Phase 2: Selection
+  phase2_max_matches: 10000             # Matches to commit to Bronze
+
   # Step 1: How many players to fetch from ladder
   initial_players_per_tier: 50
 
   # Step 2: How many matches to fetch per player
   matches_per_player: 100
 
-  # Step 3: Snowball expansion settings
-  max_total_matches: 10000 # Stop after collecting this many matches
-  max_iterations: 5 # Maximum snowball iterations
+  # Step 3: Snowball expansion settings (legacy, migrated to phase1/phase2)
+  max_total_matches: 10000 # Stop after collecting this many matches (deprecated: use phase2_max_matches)
+  max_iterations: 5 # Maximum snowball iterations (deprecated: use phase1_max_iterations)
 
   # Only collect Ranked Solo/Duo matches
   queue_filter: 420 # Queue ID for Ranked Solo/Duo

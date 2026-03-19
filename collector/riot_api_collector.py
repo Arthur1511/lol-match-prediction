@@ -59,6 +59,9 @@ class RiotAPICollector:
         # Setup logging
         self._setup_logging()
 
+        # Migrate legacy config keys to new two-phase structure
+        self._migrate_legacy_config()
+
         # Initialize rate limiter
         if 'endpoint_rate_limits' in self.config.get('riot_api', {}):
             limits = self.config['riot_api']['endpoint_rate_limits']
@@ -76,8 +79,13 @@ class RiotAPICollector:
             self._match_cache = LRUCache(
                 max_size=perf_config.get('cache_max_size', 10000)
             )
+            # Track cache performance
+            self._cache_hits: int = 0
+            self._cache_misses: int = 0
         else:
             self._match_cache = None
+            self._cache_hits: int = 0
+            self._cache_misses: int = 0
 
         # Region
         self.region = self.config["riot_api"]["default_region"]
@@ -359,7 +367,9 @@ class RiotAPICollector:
         if self._match_cache:
             cached = self._match_cache.get(match_id)
             if cached is not None:
+                self._cache_hits += 1
                 return cached
+            self._cache_misses += 1
 
         # Use precomputed routing URL
         url = self._build_routing_url(f"/lol/match/v5/matches/{match_id}")
@@ -519,6 +529,235 @@ class RiotAPICollector:
 
                 pbar.update(1)
 
+    def _migrate_legacy_config(self) -> None:
+        """
+        Migrate legacy configuration keys to new two-phase structure.
+
+        Logs warnings for deprecated keys and sets new defaults.
+        """
+        collection = self.config.get('collection', {})
+
+        # Map max_total_matches → phase2_max_matches
+        if 'max_total_matches' in collection and 'phase2_max_matches' not in collection:
+            collection['phase2_max_matches'] = collection['max_total_matches']
+            self.logger.warning(
+                "Deprecated config key 'max_total_matches' → 'phase2_max_matches'. "
+                "Please update config.yaml."
+            )
+
+        # Map max_iterations → phase1_max_iterations
+        if 'max_iterations' in collection and 'phase1_max_iterations' not in collection:
+            collection['phase1_max_iterations'] = collection['max_iterations']
+            self.logger.warning(
+                "Deprecated config key 'max_iterations' → 'phase1_max_iterations'. "
+                "Please update config.yaml."
+            )
+
+        # Set new defaults if not present
+        collection.setdefault('phase1_max_match_ids', 50000)
+        collection.setdefault('phase1_max_iterations', 5)
+        collection.setdefault('phase1_players_per_iteration', 50)
+
+    async def _fetch_match_ids_batch(
+        self,
+        player_puuids: Set[str],
+        count: int = 100
+    ) -> Set[str]:
+        """
+        Fetch match IDs for multiple players in parallel.
+
+        Args:
+            player_puuids: Set of player PUUIDs
+            count: Matches per player to fetch
+
+        Returns:
+            Set of unique match IDs
+        """
+        async def fetch_ids(puuid: str) -> List[str]:
+            return await self.fetch_player_matches(puuid, count=count)
+
+        # Create tasks for all players
+        tasks = [fetch_ids(puuid) for puuid in player_puuids]
+
+        # Fetch in parallel
+        all_ids = set()
+        for task in asyncio.as_completed(tasks):
+            match_ids = await task
+            all_ids.update(match_ids)
+
+        return all_ids
+
+    def _extract_players_from_cached_matches(
+        self,
+        match_ids: Set[str]
+    ) -> Set[str]:
+        """
+        Extract unique player PUUIDs from cached match data.
+
+        Args:
+            match_ids: Match IDs to extract players from
+
+        Returns:
+            Set of unique player PUUIDs
+        """
+        if not self._match_cache:
+            self.logger.warning("Cache not enabled, cannot extract players")
+            return set()
+
+        new_players: Set[str] = set()
+
+        for match_id in match_ids:
+            match_data = self._match_cache.get(match_id)
+            if not match_data:
+                continue
+
+            # Extract participants
+            if "info" in match_data and "participants" in match_data["info"]:
+                for participant in match_data["info"]["participants"]:
+                    if "puuid" in participant:
+                        new_players.add(participant["puuid"])
+
+        return new_players
+
+    async def phase1_discover_and_cache(
+        self,
+        initial_players: Set[str],
+        max_total_match_ids: int,
+        max_iterations: int,
+        players_per_iteration: int
+    ) -> Dict[str, int]:
+        """
+        Discover match IDs through snowball iterations with progressive caching.
+
+        Args:
+            initial_players: Starting set of player PUUIDs
+            max_total_match_ids: Stop after discovering this many unique IDs
+            max_iterations: Maximum snowball iterations
+            players_per_iteration: Players to process per iteration
+
+        Returns:
+            Dict with discovered_count, cached_count, iterations_used
+        """
+        all_match_ids: Set[str] = set()
+        players_to_process = initial_players.copy()
+
+        self.logger.info("=" * 60)
+        self.logger.info("PHASE 1: Aggressive Discovery with Caching")
+        self.logger.info("=" * 60)
+
+        for iteration in range(1, max_iterations + 1):
+            self.logger.info(f"Iteration {iteration}/{max_iterations}")
+
+            # Select subset of players (prevent explosion)
+            selected_players = set(list(players_to_process)[:players_per_iteration])
+            self.logger.info(f"  Processing {len(selected_players)} players")
+
+            # Fetch match IDs (lightweight API calls)
+            new_match_ids = await self._fetch_match_ids_batch(selected_players)
+            unique_new = new_match_ids - all_match_ids
+
+            if not unique_new:
+                self.logger.info("  No new match IDs discovered. Stopping.")
+                break
+
+            self.logger.info(f"  Discovered {len(unique_new)} new match IDs")
+            all_match_ids.update(unique_new)
+
+            # Fetch details immediately (cached, NOT committed)
+            for match_id in unique_new:
+                await self.fetch_match_details(match_id)
+                # Data is cached in self._match_cache but NOT added to:
+                #   - self.match_data
+                #   - self.collected_matches
+
+            # Extract players from cached matches for next iteration
+            new_players = self._extract_players_from_cached_matches(unique_new)
+            players_to_process = new_players
+
+            self.logger.info(f"  Extracted {len(new_players)} players from matches")
+            self.logger.info(f"  Total discovered: {len(all_match_ids)} match IDs")
+
+            # Early stop conditions
+            if len(all_match_ids) >= max_total_match_ids:
+                self.logger.info(f"  Reached match ID limit ({max_total_match_ids}). Stopping.")
+                break
+
+            if not new_players:
+                self.logger.info("  No new players discovered. Stopping.")
+                break
+
+        cached_count = len(self._match_cache._cache) if self._match_cache else 0
+
+        self.logger.info("=" * 60)
+        self.logger.info("PHASE 1 Complete")
+        self.logger.info(f"  Discovered: {len(all_match_ids)} match IDs")
+        self.logger.info(f"  Cached: {cached_count} matches")
+        self.logger.info(f"  Iterations: {iteration}")
+        self.logger.info("=" * 60)
+
+        return {
+            "discovered_count": len(all_match_ids),
+            "cached_count": cached_count,
+            "iterations_used": iteration
+        }
+
+    async def phase2_select_and_commit(
+        self,
+        max_matches: int
+    ) -> Dict[str, any]:
+        """
+        Select best matches from cache and commit to collection.
+
+        Args:
+            max_matches: Maximum matches to commit
+
+        Returns:
+            Dict with committed_count, cache_hit_rate
+        """
+        self.logger.info("=" * 60)
+        self.logger.info("PHASE 2: Select and Commit Best Matches")
+        self.logger.info("=" * 60)
+
+        if not self._match_cache:
+            raise RuntimeError("Cache not enabled. Phase 2 requires cache.")
+
+        # Get all cached match IDs
+        cached_ids = list(self._match_cache._cache.keys())
+        self.logger.info(f"  Cached matches: {len(cached_ids)}")
+
+        # Sort by recency
+        from collector.utils import sort_match_ids_by_recency
+        sorted_ids = sort_match_ids_by_recency(cached_ids)
+
+        # Select top N
+        selected_ids = sorted_ids[:max_matches]
+        self.logger.info(f"  Selected {len(selected_ids)} most recent matches")
+
+        # Commit to collection
+        committed_count = 0
+        for match_id in selected_ids:
+            match_data = self._match_cache.get(match_id)
+            if match_data:
+                self.match_data.append(match_data)
+                self.collected_matches.add(match_id)
+                committed_count += 1
+
+        self.logger.info(f"  Committed {committed_count} matches to collection")
+
+        # Calculate actual cache hit rate from Phase 1 lookups
+        total_cache_lookups = self._cache_hits + self._cache_misses
+        cache_hit_rate = (self._cache_hits / total_cache_lookups * 100) if total_cache_lookups > 0 else 0.0
+
+        self.logger.info(f"  Cache hits during Phase 1: {self._cache_hits}")
+        self.logger.info(f"  Cache misses during Phase 1: {self._cache_misses}")
+        self.logger.info(f"  Cache hit rate: {cache_hit_rate:.1f}%")
+        self.logger.info("=" * 60)
+
+        return {
+            "committed_count": committed_count,
+            "cache_hit_rate": cache_hit_rate
+        }
+
     async def step3_snowball_expansion(self, iterations: int = 3) -> None:
         """
         Step 3: Expand collection by discovering players in collected matches.
@@ -663,19 +902,30 @@ class RiotAPICollector:
                 # Step 1: Collect ladder players
                 player_puuids = await self.step1_collect_ladder_players()
 
-                # Step 2: Collect matches from those players
-                await self.step2_collect_player_matches(player_puuids)
+                # Phase 1: Discover and cache match IDs
+                phase1_result = await self.phase1_discover_and_cache(
+                    initial_players=player_puuids,
+                    max_total_match_ids=self.config["collection"]["phase1_max_match_ids"],
+                    max_iterations=self.config["collection"]["phase1_max_iterations"],
+                    players_per_iteration=self.config["collection"]["phase1_players_per_iteration"]
+                )
 
-                # Step 3: Snowball expansion
-                await self.step3_snowball_expansion()
+                # Phase 2: Select and commit best matches
+                phase2_result = await self.phase2_select_and_commit(
+                    max_matches=self.config["collection"]["phase2_max_matches"]
+                )
 
                 # Save to Bronze layer
                 output_file = self.save_to_bronze()
 
                 self.logger.info("=" * 60)
                 self.logger.info("Collection complete!")
+                self.logger.info(f"Phase 1 - Discovered: {phase1_result['discovered_count']} IDs")
+                self.logger.info(f"Phase 1 - Cached: {phase1_result['cached_count']} matches")
+                self.logger.info(f"Phase 1 - Iterations: {phase1_result['iterations_used']}")
+                self.logger.info(f"Phase 2 - Committed: {phase2_result['committed_count']} matches")
+                self.logger.info(f"Phase 2 - Cache hit rate: {phase2_result['cache_hit_rate']:.1f}%")
                 self.logger.info(f"Total players: {len(self.collected_players)}")
-                self.logger.info(f"Total matches: {len(self.collected_matches)}")
                 self.logger.info(f"Output: {output_file}")
                 self.logger.info("=" * 60)
 
